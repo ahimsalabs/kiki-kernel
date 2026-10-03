@@ -1,0 +1,109 @@
+# kiki's guest kernel follows Kata's (README.md, "Following Kata"). Weekly,
+# compare the kernel version and kata_config_version of Kata's latest
+# release with kernel.env. When they differ, push a branch that moves
+# kernel.env to that release, start a build of it (build.yml builds, but
+# does not publish, off a tag), and propose it: a pull request, or, where
+# the organization does not let Actions open pull requests, an issue
+# linking the branch.
+name: Kata bump
+
+on:
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+# One run at a time, so two cannot both propose the same bump.
+concurrency:
+  group: kata-bump
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare with Kata's latest release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          BASE: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          source kernel.env
+          kata="kata-containers/kata-containers"
+          tag="$(gh release view -R "${kata}" --json tagName -q .tagName)"
+          raw() { gh api -H 'Accept: application/vnd.github.raw' "repos/${kata}/contents/$1?ref=${tag}"; }
+          kernel="$(raw versions.yaml | awk '/^  kernel:$/ {k=1} k && /^    version:/ {gsub(/[" v]/, "", $2); print $2; exit}')"
+          config="$(raw tools/packaging/kernel/kata_config_version | tr -d '[:space:]')"
+          echo "Kata ${tag}: kernel ${kernel}-${config}; kernel.env: Kata ${KATA_VERSION}, kernel ${KERNEL_VERSION}-${KATA_CONFIG_VERSION}"
+          if [[ ! ${kernel} =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ || ! ${config} =~ ^[0-9]+$ ]]; then
+            echo "::error::cannot read Kata ${tag}'s kernel (${kernel}) or config version (${config})"
+            exit 1
+          fi
+          if [[ ${kernel} == "${KERNEL_VERSION}" && ${config} == "${KATA_CONFIG_VERSION}" ]]; then
+            exit 0
+          fi
+
+          branch="kata-bump/${tag}"
+          title="kernel: follow Kata ${tag} (kernel ${kernel}-${config})"
+          # A Kata release is proposed once: a pull request or issue for
+          # it, open or closed, ends the run, whether or not its branch is
+          # still there. A run that pushed the branch but failed before
+          # proposing it left neither: finish that one.
+          prs() { gh pr list -R "${REPO}" --head "${branch}" --state all --json number -q '.[].number'; }
+          issues() { gh issue list -R "${REPO}" --state all --search "in:title \"${title}\"" --json title -q ".[] | select(.title == \"${title}\") | .title"; }
+          # (Assigned first, so that a failed lookup fails the run.)
+          proposed="$(prs)"
+          proposed+="$(issues)"
+          if [[ -n ${proposed} ]]; then
+            echo "${branch} is proposed already"
+            exit 0
+          fi
+          if ! git ls-remote --exit-code origin "refs/heads/${branch}" >/dev/null; then
+            commit="$(gh api "repos/${kata}/commits/${tag}" -q .sha)"
+            epoch="$(date -d "$(gh api "repos/${kata}/commits/${commit}" -q .commit.committer.date)" +%s)"
+            linux="linux-${kernel}.tar.xz"
+            sum="$(curl -fsSL "https://cdn.kernel.org/pub/linux/kernel/v${kernel%%.*}.x/sha256sums.asc" | awk -v f="${linux}" '$2 == f {print $1}')"
+            if [[ ! ${sum} =~ ^[0-9a-f]{64}$ ]]; then
+              echo "::error::kernel.org's sha256sums.asc does not list ${linux}"
+              exit 1
+            fi
+            sed -i \
+              -e "s/^KATA_VERSION=.*/KATA_VERSION=${tag}/" \
+              -e "s/^KATA_COMMIT=.*/KATA_COMMIT=${commit}/" \
+              -e "s/^KERNEL_VERSION=.*/KERNEL_VERSION=${kernel}/" \
+              -e "s/^KATA_CONFIG_VERSION=.*/KATA_CONFIG_VERSION=${config}/" \
+              -e "s/^KIKI_REVISION=.*/KIKI_REVISION=1/" \
+              -e "s/^LINUX_SHA256=.*/LINUX_SHA256=${sum}/" \
+              -e "s/^SOURCE_DATE_EPOCH=.*/SOURCE_DATE_EPOCH=${epoch}/" \
+              kernel.env
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git switch -c "${branch}"
+            git commit -am "${title}" -m "Kata ${tag} pins kernel ${kernel} with kata_config_version ${config}."
+            git push origin "${branch}"
+          fi
+          gh workflow run build.yml -R "${REPO}" --ref "${branch}"
+
+          body="Kata ${tag} pins kernel ${kernel} with kata_config_version ${config}; kernel.env has Kata ${KATA_VERSION} (${KERNEL_VERSION}-${KATA_CONFIG_VERSION}). Branch \`${branch}\` moves kernel.env to it, and a build of the branch has started (Actions, Build).
+
+          Then (README.md, \"Following Kata\"): check that kiki's fragments still apply (the build fails if Kconfig drops an option), merge, tag v${kernel}-${config}-kiki.1 to publish, and move kiki's pins (internal/artifacts) to the new digests in the release build's summary, gated by kiki's \`task test:vm\` and \`task e2e\`."
+          # An issue only where the organization does not let Actions open
+          # pull requests: any other failure fails the run, and the next
+          # run tries the pull request again.
+          if ! gh pr create -R "${REPO}" --base "${BASE}" --head "${branch}" --title "${title}" --body "${body}" 2>pr.err; then
+            cat pr.err >&2
+            if ! grep -q 'not permitted to create or approve pull requests' pr.err; then
+              exit 1
+            fi
+            gh issue create -R "${REPO}" --title "${title}" \
+              --body "${body}
+
+          Open the pull request: https://github.com/${REPO}/compare/${BASE}...${branch}?expand=1 (this organization does not let Actions open pull requests)."
+          fi

@@ -1,0 +1,214 @@
+# Builds kiki's guest kernel for amd64 and arm64, and its corresponding
+# source. On a release tag, v<release> where <release> is kernel.env's
+# KERNEL_VERSION-KATA_CONFIG_VERSION-kiki.KIKI_REVISION, it also publishes
+# them: the OCI artifact ghcr.io/ahimsalabs/kiki-kernel:<release>, whose
+# per-arch layers kiki pins by digest, and a GitHub release with the same
+# files. A run started by hand on the tag (gh workflow run build.yml --ref
+# v<release>) publishes too, for when the tag's own run failed before
+# publishing. Anywhere else (a branch, by hand or from kata-bump.yml) it
+# only builds, and the files are the run's artifacts.
+name: Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+          - arch: source
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the builder image
+        run: docker build -t kiki-kernel-builder .
+      - name: Build
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          if [[ ${{ matrix.arch }} == source ]]; then
+            args=(source /out)
+          else
+            args=(kernel ${{ matrix.arch }} /out)
+          fi
+          docker run --rm -v "$PWD:/kernel:ro" -v "$PWD/out:/out" \
+            kiki-kernel-builder /kernel/build.sh "${args[@]}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kiki-kernel-${{ matrix.arch }}
+          path: |
+            out/kiki-kernel-*.tar.zst
+            out/kiki-kernel-*-source.tar
+            out/config-*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: write
+    # One publish of a release at a time: the tag's run and one started
+    # by hand on it must not both push.
+    concurrency:
+      group: publish-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dl
+      - uses: oras-project/setup-oras@v1
+        with:
+          version: 1.2.3
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+          REF_NAME: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          source kernel.env
+          release="${KERNEL_VERSION}-${KATA_CONFIG_VERSION}-kiki.${KIKI_REVISION}"
+          if [[ ${REF_NAME} != "v${release}" ]]; then
+            echo "::error::tag ${REF_NAME} is not v${release}, kernel.env's release"
+            exit 1
+          fi
+          # A run of a tag that has since moved must not publish.
+          if [[ "$(gh api "repos/${REPO}/commits/${REF_NAME}" -q .sha)" != "${SHA}" ]]; then
+            echo "::error::tag ${REF_NAME} no longer points at ${SHA}"
+            exit 1
+          fi
+          mkdir out
+          for arch in amd64 arm64; do
+            cp "dl/kiki-kernel-${arch}/kiki-kernel-${release}-${arch}.tar.zst" out/
+            cp "dl/kiki-kernel-${arch}/config-${release}" "out/config-${release}-${arch}"
+          done
+          cp "dl/kiki-kernel-source/kiki-kernel-${release}-source.tar" out/
+          cd out
+          sha256sum -- * >SHA256SUMS
+
+          ref="ghcr.io/ahimsalabs/kiki-kernel:${release}"
+          layers=("kiki-kernel-${release}-amd64.tar.zst" "kiki-kernel-${release}-arm64.tar.zst"
+            "kiki-kernel-${release}-source.tar" "config-${release}-amd64" "config-${release}-arm64")
+          echo "${GH_TOKEN}" | oras login ghcr.io -u "${ACTOR}" --password-stdin
+          # Installed kikis pin these blobs: a release is published once,
+          # and a changed kernel needs a new KIKI_REVISION. A run that
+          # finds the release already pushed with these same blobs (a rerun
+          # after a later step failed) goes on to finish it. Only a 404 for
+          # the manifest means it is not pushed: any other answer fails the
+          # run rather than risk pushing over a release.
+          token="$(curl -fsS -u "${ACTOR}:${GH_TOKEN}" \
+            "https://ghcr.io/token?service=ghcr.io&scope=repository:ahimsalabs/kiki-kernel:pull,push" | jq -r .token)"
+          code="$(curl -sS -o ../manifest.json -w '%{http_code}' -H "Authorization: Bearer ${token}" \
+            -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
+            "https://ghcr.io/v2/ahimsalabs/kiki-kernel/manifests/${release}")"
+          case "${code}" in
+          200)
+            want="$(for f in "${layers[@]}"; do echo "sha256:$(sha256sum "${f}" | cut -d' ' -f1)"; done | sort)"
+            have="$(jq -r '.layers[].digest' ../manifest.json | sort)"
+            if [[ ${want} != "${have}" ]]; then
+              echo "::error::${ref} already exists with other blobs; bump KIKI_REVISION in kernel.env"
+              exit 1
+            fi
+            echo "::notice::${ref} is already pushed with these blobs; finishing the release"
+            ;;
+          404)
+            layer=application/vnd.ahimsalabs.kiki.kernel.layer.v1.tar+zstd
+            oras push "${ref}" \
+              --artifact-type application/vnd.ahimsalabs.kiki.kernel.v1 \
+              --annotation "org.opencontainers.image.source=https://github.com/${REPO}" \
+              --annotation "org.opencontainers.image.revision=${SHA}" \
+              --annotation "org.opencontainers.image.version=${release}" \
+              --annotation "org.opencontainers.image.licenses=GPL-2.0-only" \
+              --annotation "org.opencontainers.image.description=kiki's guest kernel ${release} (Kata ${KATA_VERSION}'s ${KERNEL_VERSION}-${KATA_CONFIG_VERSION} plus kiki's fragments) for amd64 and arm64, with its config and corresponding source" \
+              "${layers[0]}:${layer}" \
+              "${layers[1]}:${layer}" \
+              "${layers[2]}:application/vnd.ahimsalabs.kiki.kernel.source.v1.tar" \
+              "${layers[3]}:text/plain" \
+              "${layers[4]}:text/plain"
+            ;;
+          *)
+            echo "::error::cannot tell whether ${ref} exists: HTTP ${code}: $(head -c 500 ../manifest.json)"
+            exit 1
+            ;;
+          esac
+
+          notes="Kata ${KATA_VERSION}'s kernel ${KERNEL_VERSION} with kata_config_version ${KATA_CONFIG_VERSION}, plus kiki's fragments (revision ${KIKI_REVISION}). The same files are the layers of \`${ref}\`. kiki-kernel-${release}-source.tar is the complete corresponding source; see README.md."
+          if gh release view "${REF_NAME}" -R "${REPO}" >/dev/null 2>&1; then
+            # A run that failed while creating the release: keep the assets
+            # it uploaded if they are these files, add the missing ones,
+            # and publish the draft. An upload that failed can leave its
+            # asset behind, empty and not "uploaded": replace it.
+            assets="$(gh release view "${REF_NAME}" -R "${REPO}" --json assets)"
+            have="$(jq -r '.assets[] | select(.state == "uploaded") | .name' <<<"${assets}")"
+            for f in $(jq -r '.assets[] | select(.state != "uploaded") | .name' <<<"${assets}"); do
+              gh release delete-asset "${REF_NAME}" "${f}" -R "${REPO}" --yes
+            done
+            mkdir ../have
+            for f in *; do
+              if grep -qxF -- "${f}" <<<"${have}"; then
+                gh release download "${REF_NAME}" -R "${REPO}" -p "${f}" -D ../have
+                if ! cmp -s -- "${f}" "../have/${f}"; then
+                  echo "::error::release ${REF_NAME} already has a different ${f}"
+                  exit 1
+                fi
+              else
+                gh release upload "${REF_NAME}" -R "${REPO}" -- "${f}"
+              fi
+            done
+            gh release edit "${REF_NAME}" -R "${REPO}" --draft=false
+          else
+            gh release create "${REF_NAME}" -R "${REPO}" --verify-tag \
+              --title "kiki-kernel ${release}" --notes "${notes}" -- *
+          fi
+
+          # kiki fetches the blobs anonymously. A new package is private
+          # until an organization owner makes it public, once (README.md,
+          # "Publishing").
+          token="$(curl -fsS "https://ghcr.io/token?scope=repository:ahimsalabs/kiki-kernel:pull" | jq -r '.token // empty')" || token=""
+          if [[ -z ${token} ]] || ! curl -fsS -o /dev/null -H "Authorization: Bearer ${token}" \
+            "https://ghcr.io/v2/ahimsalabs/kiki-kernel/blobs/sha256:$(sha256sum "${layers[0]}" | cut -d' ' -f1)"; then
+            echo "::warning::${ref} cannot be pulled anonymously: make the package public at https://github.com/orgs/ahimsalabs/packages/container/package/kiki-kernel/settings"
+          fi
+
+          {
+            echo "## ${ref}"
+            echo
+            echo '| file | size | sha256 |'
+            echo '|---|---|---|'
+            for f in *; do
+              [[ ${f} == SHA256SUMS ]] && continue
+              echo "| ${f} | $(stat -c %s "${f}") | $(sha256sum "${f}" | cut -d' ' -f1) |"
+            done
+            echo
+            echo 'Members (pin these in kiki, internal/artifacts/pinned.go):'
+            echo
+            echo '```'
+            for arch in amd64 arm64; do
+              f="kiki-kernel-${release}-${arch}.tar.zst"
+              mkdir "x-${arch}"
+              tar --zstd -xf "${f}" -C "x-${arch}"
+              echo "${arch}: blob sha256:$(sha256sum "${f}" | cut -d' ' -f1) size $(stat -c %s "${f}")"
+              for m in vmlinux config; do
+                p="x-${arch}/${m}-${release}"
+                echo "  ${m}-${release} size $(stat -c %s "${p}") sha256 $(sha256sum "${p}" | cut -d' ' -f1)"
+              done
+            done
+            echo '```'
+          } >>"${GITHUB_STEP_SUMMARY}"

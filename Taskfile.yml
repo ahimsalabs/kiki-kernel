@@ -1,0 +1,33 @@
+version: '3'
+
+vars:
+  # Kernels build natively: amd64 on x86_64, arm64 on aarch64.
+  ARCH:
+    sh: case "$(uname -m)" in x86_64) echo amd64 ;; arm64|aarch64) echo arm64 ;; esac
+  OUT: out
+
+tasks:
+  builder:
+    desc: Build the builder image.
+    cmds:
+      - docker build -t kiki-kernel-builder .
+
+  build:
+    desc: Build the kernel for this host's architecture into OUT (default out/).
+    deps: [builder]
+    cmds:
+      - mkdir -p {{.OUT}}
+      - docker run --rm -v "$PWD:/kernel:ro" -v "$(cd {{.OUT}} && pwd):/out" kiki-kernel-builder /kernel/build.sh kernel {{.ARCH}} /out
+
+  source:
+    desc: Bundle the corresponding source into OUT (default out/).
+    deps: [builder]
+    cmds:
+      - mkdir -p {{.OUT}}
+      - docker run --rm -v "$PWD:/kernel:ro" -v "$(cd {{.OUT}} && pwd):/out" kiki-kernel-builder /kernel/build.sh source /out
+
+  lint:
+    desc: Lint the scripts and workflows.
+    cmds:
+      - docker run --rm -v "$PWD:/mnt:ro" -w /mnt koalaman/shellcheck:v0.10.0 -x build.sh
+      - docker run --rm -v "$PWD:/repo:ro" -w /repo rhysd/actionlint:1.7.7
