@@ -1,0 +1,66 @@
+From: Chris Broadfoot <chris@chrisbroadfoot.id.au>
+Subject: [PATCH] mm/page_reporting: apply a new page_reporting_delay_ms to a
+ pending pass
+
+page_reporting_delay_ms takes effect when the next pass is scheduled. A
+guest that frees pages all the time has a pass scheduled most of the
+time, so lowering the delay to have the pages it just freed reported at
+once still waits up to the old delay (2 s by default) for that pass.
+
+Re-time a pending pass when the parameter is set, on the queue
+schedule_delayed_work() uses. pr_dev_info is read under RCU, as
+page_reporting_unregister() expects: it clears the pointer and calls
+synchronize_rcu() before cancel_delayed_work_sync().
+
+Not upstream: kiki's own, on top of the backport of 7a39f03bc9da (1001).
+---
+diff --git a/mm/page_reporting.c b/mm/page_reporting.c
+--- a/mm/page_reporting.c
++++ b/mm/page_reporting.c
+@@ -48,12 +48,43 @@
+ EXPORT_SYMBOL_GPL(page_reporting_order);
+ 
+ static unsigned int page_reporting_delay_ms = 2 * MSEC_PER_SEC;
+-module_param(page_reporting_delay_ms, uint, 0644);
++static struct page_reporting_dev_info __rcu *pr_dev_info __read_mostly;
++
++/*
++ * A new delay also applies to a pass that is already scheduled, so that
++ * lowering it returns the pages freed since the last pass without first
++ * waiting out the delay that pass was scheduled with.
++ */
++static int page_reporting_delay_set(const char *val,
++				    const struct kernel_param *kp)
++{
++	struct page_reporting_dev_info *prdev;
++	int err;
++
++	err = param_set_uint(val, kp);
++	if (err)
++		return err;
++
++	rcu_read_lock();
++	prdev = rcu_dereference(pr_dev_info);
++	if (prdev && delayed_work_pending(&prdev->work))
++		mod_delayed_work(system_percpu_wq, &prdev->work,
++				 msecs_to_jiffies(READ_ONCE(page_reporting_delay_ms)));
++	rcu_read_unlock();
++
++	return 0;
++}
++
++static const struct kernel_param_ops page_reporting_delay_ops = {
++	.set = page_reporting_delay_set,
++	.get = param_get_uint,
++};
++
++module_param_cb(page_reporting_delay_ms, &page_reporting_delay_ops,
++		&page_reporting_delay_ms, 0644);
+ MODULE_PARM_DESC(page_reporting_delay_ms,
+ 		 "Set page reporting delay in milliseconds");
+ 
+-static struct page_reporting_dev_info __rcu *pr_dev_info __read_mostly;
+-
+ enum {
+ 	PAGE_REPORTING_IDLE = 0,
+ 	PAGE_REPORTING_REQUESTED,

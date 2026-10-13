@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Build kiki's guest kernel: Kata's kernel at kernel.env's pins, configured
-# by Kata's build-kernel.sh from Kata's fragments plus kiki's (fragments/).
+# Build kiki's guest kernel: Kata's kernel at kernel.env's pins, patched
+# and configured by Kata's build-kernel.sh from Kata's patches and
+# fragments plus kiki's (patches/, fragments/).
 # Run it in the builder image (Dockerfile here), natively on the target
 # architecture:
 #
@@ -14,7 +15,7 @@
 # complete corresponding source (GPL-2.0 §3): Linux's release tarball,
 # Kata's kernel packaging (build-kernel.sh, its config fragments and
 # patches, the scripts it sources) at KATA_COMMIT, and this repository's
-# build files.
+# build files and patches.
 #
 # WORKDIR (default: a temp dir) keeps the Kata checkout and the Linux
 # tarball between runs. It must be on a case-sensitive filesystem: Linux's
@@ -149,6 +150,21 @@ build_kernel() {
 		kiki_frags+=("${here}/fragments/${frag_arch}.conf")
 	fi
 
+	# kiki's patches go beside Kata's for the kernel's series, which
+	# build-kernel.sh setup applies in name order, after Kata's (theirs
+	# are numbered from 0001, kiki's from 1001). A series directory that
+	# is not the kernel's fails the build: a Kata bump to a new series
+	# must drop or rebase each patch, not build without it.
+	local series="${KERNEL_VERSION%.*}.x" dir
+	for dir in "${here}"/patches/*/; do
+		[[ -d ${dir} ]] || continue
+		[[ "$(basename "${dir}")" == "${series}" ]] ||
+			die "patches/$(basename "${dir}") is not the kernel's series ${series}: drop or rebase its patches"
+	done
+	if [[ -d "${here}/patches/${series}" ]]; then
+		cp "${here}/patches/${series}"/*.patch "${pkg}/patches/${series}/"
+	fi
+
 	export KBUILD_BUILD_TIMESTAMP="@${SOURCE_DATE_EPOCH}"
 	export KBUILD_BUILD_USER=kiki KBUILD_BUILD_HOST=kiki KBUILD_BUILD_VERSION=1
 	export SOURCE_DATE_EPOCH
@@ -241,7 +257,7 @@ build_source() {
 	cp -p "${work}/${linux}" "${stage}/"
 	cp -p "${kata}/versions.yaml" "${stage}/kata-${KATA_VERSION}/"
 	cp -pR "${pkg}" "${kata}/tools/packaging/scripts" "${stage}/kata-${KATA_VERSION}/tools/packaging/"
-	(cd "${here}" && cp -pR README.md LICENSE kernel.env build.sh Dockerfile fragments "${stage}/kiki-kernel/")
+	(cd "${here}" && cp -pR README.md LICENSE kernel.env build.sh Dockerfile fragments patches "${stage}/kiki-kernel/")
 	# The checkout's umask must not reach the tar: only whether a file is
 	# executable does.
 	chmod -R u=rwX,go=rX "${stage}"

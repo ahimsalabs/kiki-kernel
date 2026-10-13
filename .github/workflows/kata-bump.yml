@@ -93,7 +93,7 @@ jobs:
 
           body="Kata ${tag} pins kernel ${kernel} with kata_config_version ${config}; kernel.env has Kata ${KATA_VERSION} (${KERNEL_VERSION}-${KATA_CONFIG_VERSION}). Branch \`${branch}\` moves kernel.env to it, and a build of the branch has started (Actions, Build).
 
-          Then (README.md, \"Following Kata\"): check that kiki's fragments still apply (the build fails if Kconfig drops an option), merge, tag v${kernel}-${config}-kiki.1 to publish, and move kiki's pins (internal/artifacts) to the new digests in the release build's summary, gated by kiki's \`task test:vm\` and \`task e2e\`."
+          Then (README.md, \"Following Kata\"): check that kiki's patches and fragments still apply (the build fails if a patch does not apply, if patches/ has no directory for a new series, or if Kconfig drops an option), merge, tag v${kernel}-${config}-kiki.1 to publish, and move kiki's pins (internal/artifacts) to the new digests in the release build's summary, gated by kiki's \`task test:vm\` and \`task e2e\`."
           # An issue only where the organization does not let Actions open
           # pull requests: any other failure fails the run, and the next
           # run tries the pull request again.

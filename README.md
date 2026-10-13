@@ -2,18 +2,36 @@
 
 The guest kernel [kiki](https://github.com/ahimsalabs/kiki) boots its
 Cloud Hypervisor VMs with: Kata Containers' pinned kernel and config, plus a
-small kiki fragment, for amd64 (an uncompressed PVH `vmlinux` ELF) and arm64
-(an `Image`). It is built with Kata's own `build-kernel.sh`, so the result
-is Kata's kernel with a few options added, and nothing else.
+small kiki fragment and a few backports from upstream Linux, for amd64 (an
+uncompressed PVH `vmlinux` ELF) and arm64 (an `Image`). It is built with
+Kata's own `build-kernel.sh`, so the result is Kata's kernel with a few
+options and upstream commits added, and nothing else.
 
 Published as the OCI artifact `ghcr.io/ahimsalabs/kiki-kernel:<release>` and
 as the GitHub release `v<release>` with the same files, where `<release>` is
 `<kernel version>-<kata_config_version>-kiki.<revision>`, such as
-`6.18.35-202-kiki.1`. kiki pins each architecture's blob by SHA-256 and size
+`6.18.35-202-kiki.2`. kiki pins each architecture's blob by SHA-256 and size
 (`internal/artifacts` there), and `kiki setup artifacts` fetches the one for
 the host's architecture.
 
 ## What kiki adds
+
+`patches/<series>.x/`: commits from upstream Linux that Kata's kernel does
+not have yet, each cherry-picked as a `git format-patch` file that keeps
+the upstream author, message and commit id, with a note on any change the
+backport needed, and kiki's own changes on top of them, which say so.
+`build.sh` adds them to Kata's patches for the kernel's series, after
+Kata's own:
+
+| Patch | Upstream | Why |
+|---|---|---|
+| `1001-mm-page_reporting-add-page_reporting_delay_ms-module-parameter` | 7a39f03bc9da, Linux 7.3 | Free page reporting waits a fixed 2 s before returning freed guest memory to the host. The parameter lets kiki's guest agent shorten that while it drops the page cache before a pause or a suspend to disk, so the host gets the memory back in well under a second rather than over about 4 s, and leave the default the rest of the time. Backported onto 6.18, which queues the work with `schedule_delayed_work()` |
+| `1002-mm-page_reporting-apply-a-new-page_reporting_delay_ms-to-a-pending-pass` | none: kiki's | Upstream, a new delay applies only from the next pass scheduled. A guest that frees pages all the time nearly always has one scheduled, so the pages a reclaim frees still waited up to 2 s. Setting the parameter re-times a pending pass |
+
+A backport is dropped when Kata's kernel has it. Its directory names the
+series it applies to, and the build fails when `patches/` has a series
+that is not the kernel's, so a Kata bump to a new series has to drop or
+rebase each patch rather than build without it.
 
 `fragments/common.conf` (every architecture) and `fragments/x86_64.conf`:
 
@@ -85,7 +103,8 @@ case-sensitive filesystem (Linux's tree has both `xt_DSCP.c` and
 `build.sh` checks out Kata's packaging scripts at `KATA_COMMIT`, checks that
 `KATA_VERSION`, `KERNEL_VERSION` and `KATA_CONFIG_VERSION` are what that
 commit says, fetches Linux's release tarball and checks it against
-`LINUX_SHA256`, adds kiki's fragments to Kata's for the architecture, and
+`LINUX_SHA256`, adds kiki's patches to Kata's for the kernel's series and
+kiki's fragments to Kata's for the architecture, and
 runs `build-kernel.sh -x -m` as Kata builds its default kernel
 (`install_kernel` in `kata-deploy-binaries.sh`).
 
@@ -128,8 +147,10 @@ digests and sizes in the run's summary, and gate the change with kiki's
 
 ## Following Kata
 
-kiki follows Kata's pinned kernel and does not pick kernel versions or
-backport patches itself. The Kata bump workflow (`kata-bump.yml`, weekly
+kiki follows Kata's pinned kernel and does not pick kernel versions
+itself. It backports an upstream commit only when kiki needs it before
+Kata's kernel has it, and carries a change of its own only on top of one
+(`patches/`, above). The Kata bump workflow (`kata-bump.yml`, weekly
 and by hand) compares the kernel version (`assets.kernel.version` in
 `versions.yaml`) and `tools/packaging/kernel/kata_config_version` of Kata's
 latest release with `kernel.env`. When either moves, it pushes a branch
@@ -140,13 +161,15 @@ build of the branch, and opens a pull request for it (or, while the
 organization does not let Actions open pull requests, an issue linking
 the branch). To follow it:
 
-1. Check the branch's build passed: a fragment option Kconfig no longer
-   offers fails it.
+1. Check the branch's build passed: a patch that no longer applies, a
+   `patches/` series that is not the new kernel's, or a fragment option
+   Kconfig no longer offers fails it. Drop the patches the new kernel has
+   (upstream's commit id is in each), and rebase the others onto it.
 2. Merge, and push the tag `v<kernel>-<config>-kiki.1`.
 3. Pin the new digests in kiki, as above.
 
-Any other change to what goes into the kernel (a fragment, the builder
-image) bumps `KIKI_REVISION` alone, and is released the same way.
+Any other change to what goes into the kernel (a patch, a fragment, the
+builder image) bumps `KIKI_REVISION` alone, and is released the same way.
 
 ## Licensing
 
@@ -163,7 +186,8 @@ corresponding source:
   the config fragments, and the patches it applies, `patches/<series>.x/`)
   and `tools/packaging/scripts` at `KATA_COMMIT`, with `versions.yaml`
   (Apache-2.0; the patches are GPL-2.0, as the kernel);
-- `kiki-kernel/`: this repository's build files at the release.
+- `kiki-kernel/`: this repository's build files and patches at the
+  release.
 
 Each architecture's exact `.config` is published beside its binary
 (`config-<release>` in the tar, and `config-<release>-<arch>`), and

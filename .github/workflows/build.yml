@@ -136,7 +136,7 @@ jobs:
               --annotation "org.opencontainers.image.revision=${SHA}" \
               --annotation "org.opencontainers.image.version=${release}" \
               --annotation "org.opencontainers.image.licenses=GPL-2.0-only" \
-              --annotation "org.opencontainers.image.description=kiki's guest kernel ${release} (Kata ${KATA_VERSION}'s ${KERNEL_VERSION}-${KATA_CONFIG_VERSION} plus kiki's fragments) for amd64 and arm64, with its config and corresponding source" \
+              --annotation "org.opencontainers.image.description=kiki's guest kernel ${release} (Kata ${KATA_VERSION}'s ${KERNEL_VERSION}-${KATA_CONFIG_VERSION} plus kiki's patches and fragments) for amd64 and arm64, with its config and corresponding source" \
               "${layers[0]}:${layer}" \
               "${layers[1]}:${layer}" \
               "${layers[2]}:application/vnd.ahimsalabs.kiki.kernel.source.v1.tar" \
@@ -149,7 +149,7 @@ jobs:
             ;;
           esac
 
-          notes="Kata ${KATA_VERSION}'s kernel ${KERNEL_VERSION} with kata_config_version ${KATA_CONFIG_VERSION}, plus kiki's fragments (revision ${KIKI_REVISION}). The same files are the layers of \`${ref}\`. kiki-kernel-${release}-source.tar is the complete corresponding source; see README.md."
+          notes="Kata ${KATA_VERSION}'s kernel ${KERNEL_VERSION} with kata_config_version ${KATA_CONFIG_VERSION}, plus kiki's patches and fragments (revision ${KIKI_REVISION}). The same files are the layers of \`${ref}\`. kiki-kernel-${release}-source.tar is the complete corresponding source; see README.md."
           if gh release view "${REF_NAME}" -R "${REPO}" >/dev/null 2>&1; then
             # A run that failed while creating the release: keep the assets
             # it uploaded if they are these files, add the missing ones,
