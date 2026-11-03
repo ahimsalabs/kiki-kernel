@@ -1,0 +1,5 @@
+# Kata patches that this kernel has already, taken in by Linux's 6.18 stable
+# releases after the one Kata pins (each no longer applies): one file name per
+# line, not applied by build.sh.
+0001-fs-dax-check-zero-or-empty-entry-before-converting-xarray.patch
+0002-virtio-fs-use-sync-release-for-submounts.patch

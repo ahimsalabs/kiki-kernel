@@ -9,7 +9,7 @@
 # dwarves, which only depends on it): when Ubuntu replaces one
 # of these in jammy-updates, the builder stops building rather than build
 # different bytes for the same release. Moving a pin is a change to the
-# kernel (README.md, "Following Kata"). build.sh records the toolchain's
+# kernel (README.md, "Following Kata and the longterm line"). build.sh records the toolchain's
 # versions in the artifact's buildinfo.
 FROM ubuntu:22.04@sha256:b1066385161d28ddf6bc7e7b28a9170eec11484c821d1a5150d176cbde41d7f7
 ENV DEBIAN_FRONTEND=noninteractive
