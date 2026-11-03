@@ -29,5 +29,5 @@ tasks:
   lint:
     desc: Lint the scripts and workflows.
     cmds:
-      - docker run --rm -v "$PWD:/mnt:ro" -w /mnt koalaman/shellcheck:v0.10.0 -x build.sh
+      - docker run --rm -v "$PWD:/mnt:ro" -w /mnt koalaman/shellcheck:v0.10.0 -x build.sh scripts/bump-kernel.sh
       - docker run --rm -v "$PWD:/repo:ro" -w /repo rhysd/actionlint:1.7.7

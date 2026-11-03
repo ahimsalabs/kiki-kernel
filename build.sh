@@ -101,8 +101,11 @@ prepare() {
 	# "  kernel:".
 	local kata_kernel
 	kata_kernel="$(awk '/^  kernel:$/ {k=1} k && /^    version:/ {gsub(/[" v]/, "", $2); print $2; exit}' "${kata}/versions.yaml")"
-	[[ ${kata_kernel} == "${KERNEL_VERSION}" ]] ||
-		die "Kata ${KATA_VERSION} pins kernel ${kata_kernel}, kernel.env says ${KERNEL_VERSION}"
+	# kiki takes point releases from kernel.org itself, so the kernel may be
+	# newer than Kata's, but must be in Kata's series: Kata's config and
+	# patches are for that series.
+	[[ ${kata_kernel%.*} == "${KERNEL_VERSION%.*}" ]] ||
+		die "Kata ${KATA_VERSION} pins kernel ${kata_kernel}, a different series from kernel.env's ${KERNEL_VERSION}"
 
 	# build-kernel.sh takes the tarball and its checksum line from its
 	# working directory, so the pinned digest is the one it checks.
@@ -163,6 +166,20 @@ build_kernel() {
 	done
 	if [[ -d "${here}/patches/${series}" ]]; then
 		cp "${here}/patches/${series}"/*.patch "${pkg}/patches/${series}/"
+	fi
+	# Kata's patches that the kernel has since taken in (kiki's kernel can
+	# be a later point release than Kata's) would not apply: the series'
+	# kata-dropped file names them, and the build fails if it names one
+	# Kata's kernel no longer has, so it does not outlive its reason.
+	local dropped="${here}/patches/${series}/kata-dropped" name
+	if [[ -f ${dropped} ]]; then
+		while IFS= read -r name; do
+			name="${name%%#*}"
+			name="${name//[[:space:]]/}"
+			[[ -n ${name} ]] || continue
+			[[ -f "${pkg}/patches/${series}/${name}" ]] || die "${dropped} names ${name}, which Kata ${KATA_VERSION} does not have"
+			rm "${pkg}/patches/${series}/${name}"
+		done <"${dropped}"
 	fi
 
 	export KBUILD_BUILD_TIMESTAMP="@${SOURCE_DATE_EPOCH}"

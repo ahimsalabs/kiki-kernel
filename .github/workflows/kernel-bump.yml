@@ -1,0 +1,67 @@
+# kiki's guest kernel takes the point releases of its longterm line from
+# kernel.org itself (README.md, "Following Kata and the longterm line"). Weekly, look
+# for a newer release of the line kernel.env pins; when there is one,
+# scripts/bump-kernel.sh checks kernel.org's PGP-signed sha256sums.asc and
+# rewrites kernel.env, one pull request on bot/kernel-bump carries it (a
+# run updates it), and a build of the branch starts. It never merges: a
+# kernel change gets a review.
+#
+# Needs a GitHub App installed on this repository with contents, pull
+# requests and actions write (vars.KERNEL_BOT_APP_ID,
+# secrets.KERNEL_BOT_PRIVATE_KEY): a pull request opened with GITHUB_TOKEN
+# starts no workflows.
+name: Kernel bump
+
+on:
+  schedule:
+    - cron: '23 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kernel-bump
+  cancel-in-progress: false
+
+env:
+  BRANCH: bot/kernel-bump
+
+jobs:
+  bump:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/create-github-app-token@v3
+        id: app
+        with:
+          app-id: ${{ vars.KERNEL_BOT_APP_ID }}
+          private-key: ${{ secrets.KERNEL_BOT_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-actions: write
+      - name: Bump kernel.env
+        id: bump
+        run: |
+          set -euo pipefail
+          version="$(scripts/bump-kernel.sh "$RUNNER_TEMP/body.md")"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "${version:-No newer release of the pinned line.}" >> "$GITHUB_STEP_SUMMARY"
+      - name: Pull request
+        id: pr
+        if: steps.bump.outputs.version
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ steps.app.outputs.token }}
+          branch: ${{ env.BRANCH }}
+          add-paths: kernel.env
+          commit-message: 'kernel: Linux ${{ steps.bump.outputs.version }}'
+          title: 'kernel: Linux ${{ steps.bump.outputs.version }}'
+          body-path: ${{ runner.temp }}/body.md
+          delete-branch: true
+      - name: Build the branch
+        if: steps.pr.outputs.pull-request-operation == 'created' || steps.pr.outputs.pull-request-operation == 'updated'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: gh workflow run build.yml --ref "$BRANCH"

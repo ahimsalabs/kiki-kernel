@@ -1,5 +1,6 @@
-# kiki's guest kernel follows Kata's (README.md, "Following Kata"). Weekly,
-# compare the kernel version and kata_config_version of Kata's latest
+# kiki's guest kernel follows Kata's config and kernel series (README.md,
+# "Following Kata and the longterm line"); its point releases come from kernel-bump.yml. Weekly,
+# compare the kernel series and kata_config_version of Kata's latest
 # release with kernel.env. When they differ, push a branch that moves
 # kernel.env to that release, start a build of it (build.yml builds, but
 # does not publish, off a tag), and propose it: a pull request, or, where
@@ -45,6 +46,12 @@ jobs:
           if [[ ! ${kernel} =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ || ! ${config} =~ ^[0-9]+$ ]]; then
             echo "::error::cannot read Kata ${tag}'s kernel (${kernel}) or config version (${config})"
             exit 1
+          fi
+          # kiki may be on a newer point release of Kata's series than
+          # Kata (kernel-bump.yml): keep it, since Kata's older one is no
+          # reason to move back.
+          if [[ ${kernel%.*} == "${KERNEL_VERSION%.*}" && "$(printf '%s\n%s\n' "${KERNEL_VERSION}" "${kernel}" | sort -V | tail -1)" == "${KERNEL_VERSION}" ]]; then
+            kernel="${KERNEL_VERSION}"
           fi
           if [[ ${kernel} == "${KERNEL_VERSION}" && ${config} == "${KATA_CONFIG_VERSION}" ]]; then
             exit 0
@@ -93,7 +100,7 @@ jobs:
 
           body="Kata ${tag} pins kernel ${kernel} with kata_config_version ${config}; kernel.env has Kata ${KATA_VERSION} (${KERNEL_VERSION}-${KATA_CONFIG_VERSION}). Branch \`${branch}\` moves kernel.env to it, and a build of the branch has started (Actions, Build).
 
-          Then (README.md, \"Following Kata\"): check that kiki's patches and fragments still apply (the build fails if a patch does not apply, if patches/ has no directory for a new series, or if Kconfig drops an option), merge, tag v${kernel}-${config}-kiki.1 to publish, and move kiki's pins (internal/artifacts) to the new digests in the release build's summary, gated by kiki's \`task test:vm\` and \`task e2e\`."
+          Then (README.md, \"Following Kata and the longterm line\"): check that kiki's patches and fragments still apply (the build fails if a patch does not apply, if patches/ has no directory for a new series, or if Kconfig drops an option), merge, tag v${kernel}-${config}-kiki.1 to publish, and move kiki's pins (internal/artifacts) to the new digests in the release build's summary, gated by kiki's \`task test:vm\` and \`task e2e\`."
           # An issue only where the organization does not let Actions open
           # pull requests: any other failure fails the run, and the next
           # run tries the pull request again.

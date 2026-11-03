@@ -8,8 +8,8 @@ time, so lowering the delay to have the pages it just freed reported at
 once still waits up to the old delay (2 s by default) for that pass.
 
 Re-time a pending pass when the parameter is set, on the queue
-schedule_delayed_work() uses. pr_dev_info is read under RCU, as
-page_reporting_unregister() expects: it clears the pointer and calls
+page_reporting_schedule_work() uses (system_freezable_wq). pr_dev_info is
+read under RCU, as page_reporting_unregister() expects: it clears the pointer and calls
 synchronize_rcu() before cancel_delayed_work_sync().
 
 Not upstream: kiki's own, on top of the backport of 7a39f03bc9da (1001).
@@ -42,7 +42,7 @@ diff --git a/mm/page_reporting.c b/mm/page_reporting.c
 +	rcu_read_lock();
 +	prdev = rcu_dereference(pr_dev_info);
 +	if (prdev && delayed_work_pending(&prdev->work))
-+		mod_delayed_work(system_percpu_wq, &prdev->work,
++		mod_delayed_work(system_freezable_wq, &prdev->work,
 +				 msecs_to_jiffies(READ_ONCE(page_reporting_delay_ms)));
 +	rcu_read_unlock();
 +

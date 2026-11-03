@@ -1,16 +1,17 @@
 # kiki-kernel
 
 The guest kernel [kiki](https://github.com/ahimsalabs/kiki) boots its
-Cloud Hypervisor VMs with: Kata Containers' pinned kernel and config, plus a
+Cloud Hypervisor VMs with: Kata Containers' kernel config on the latest point
+release of Linux's longterm series that Kata pins, plus a
 small kiki fragment and a few backports from upstream Linux, for amd64 (an
 uncompressed PVH `vmlinux` ELF) and arm64 (an `Image`). It is built with
-Kata's own `build-kernel.sh`, so the result is Kata's kernel with a few
+Kata's own `build-kernel.sh`, so the result is Kata's kernel configuration with a few
 options and upstream commits added, and nothing else.
 
 Published as the OCI artifact `ghcr.io/ahimsalabs/kiki-kernel:<release>` and
 as the GitHub release `v<release>` with the same files, where `<release>` is
 `<kernel version>-<kata_config_version>-kiki.<revision>`, such as
-`6.18.35-202-kiki.2`. kiki pins each architecture's blob by SHA-256 and size
+`6.18.60-202-kiki.1`. kiki pins each architecture's blob by SHA-256 and size
 (`internal/artifacts` there), and `kiki setup artifacts` fetches the one for
 the host's architecture.
 
@@ -25,10 +26,14 @@ Kata's own:
 
 | Patch | Upstream | Why |
 |---|---|---|
-| `1001-mm-page_reporting-add-page_reporting_delay_ms-module-parameter` | 7a39f03bc9da, Linux 7.3 | Free page reporting waits a fixed 2 s before returning freed guest memory to the host. The parameter lets kiki's guest agent shorten that while it drops the page cache before a pause or a suspend to disk, so the host gets the memory back in well under a second rather than over about 4 s, and leave the default the rest of the time. Backported onto 6.18, which queues the work with `schedule_delayed_work()` |
+| `1001-mm-page_reporting-add-page_reporting_delay_ms-module-parameter` | 7a39f03bc9da, Linux 7.3 | Free page reporting waits a fixed 2 s before returning freed guest memory to the host. The parameter lets kiki's guest agent shorten that while it drops the page cache before a pause or a suspend to disk, so the host gets the memory back in well under a second rather than over about 4 s, and leave the default the rest of the time. Rebased onto 6.18.60, which queues the work on `system_freezable_wq` as upstream does |
 | `1002-mm-page_reporting-apply-a-new-page_reporting_delay_ms-to-a-pending-pass` | none: kiki's | Upstream, a new delay applies only from the next pass scheduled. A guest that frees pages all the time nearly always has one scheduled, so the pages a reclaim frees still waited up to 2 s. Setting the parameter re-times a pending pass |
 
-A backport is dropped when Kata's kernel has it. Its directory names the
+A backport is dropped when the kernel has it. Because kiki's kernel can be a
+later point release than Kata's, Kata's own patches that the stable releases
+have taken in since (they no longer apply) are listed in
+`patches/<series>.x/kata-dropped`, and `build.sh` leaves them out; it fails
+if that file names a patch Kata's kernel no longer has. A patch's directory names the
 series it applies to, and the build fails when `patches/` has a series
 that is not the kernel's, so a Kata bump to a new series has to drop or
 rebase each patch rather than build without it.
@@ -145,21 +150,25 @@ Then, in kiki, move the pins in `internal/artifacts/pinned.go` to the
 digests and sizes in the run's summary, and gate the change with kiki's
 `task test:vm` and `task e2e`.
 
-## Following Kata
+## Following Kata and the longterm line
 
-kiki follows Kata's pinned kernel and does not pick kernel versions
-itself. It backports an upstream commit only when kiki needs it before
-Kata's kernel has it, and carries a change of its own only on top of one
-(`patches/`, above). The Kata bump workflow (`kata-bump.yml`, weekly
-and by hand) compares the kernel version (`assets.kernel.version` in
-`versions.yaml`) and `tools/packaging/kernel/kata_config_version` of Kata's
-latest release with `kernel.env`. When either moves, it pushes a branch
-`kata-bump/<kata tag>` that moves `KATA_VERSION`, `KATA_COMMIT`,
-`KERNEL_VERSION`, `KATA_CONFIG_VERSION`, `LINUX_SHA256` and
-`SOURCE_DATE_EPOCH` together and resets `KIKI_REVISION` to 1, starts a
-build of the branch, and opens a pull request for it (or, while the
-organization does not let Actions open pull requests, an issue linking
-the branch). To follow it:
+kiki follows Kata for the kernel's config and series, and kernel.org's
+longterm line for point releases.
+
+**Kata: config and series.** kiki's kernel is built from Kata's config and
+patches (`KATA_COMMIT`), and stays in the series Kata pins (6.18.x). It
+does not pick a series itself. It backports an upstream commit only when
+kiki needs it before the kernel has it, and carries a change of its own
+only on top of one (`patches/`, above). The Kata bump workflow
+(`kata-bump.yml`, weekly and by hand) compares the kernel's series
+(`assets.kernel.version` in `versions.yaml`) and
+`tools/packaging/kernel/kata_config_version` of Kata's latest release with
+`kernel.env`. When either moves, it pushes a branch `kata-bump/<kata tag>`
+that moves `KATA_VERSION`, `KATA_COMMIT`, `KERNEL_VERSION`,
+`KATA_CONFIG_VERSION`, `LINUX_SHA256` and `SOURCE_DATE_EPOCH` together and
+resets `KIKI_REVISION` to 1, starts a build of the branch, and opens a pull
+request for it (or, while the organization does not let Actions open pull
+requests, an issue linking the branch). To follow it:
 
 1. Check the branch's build passed: a patch that no longer applies, a
    `patches/` series that is not the new kernel's, or a fragment option
@@ -167,6 +176,32 @@ the branch). To follow it:
    (upstream's commit id is in each), and rebase the others onto it.
 2. Merge, and push the tag `v<kernel>-<config>-kiki.1`.
 3. Pin the new digests in kiki, as above.
+
+**Longterm line: point releases.** Kata pins a kernel point release and
+moves it rarely, so the kernel would miss the stable releases between. kiki
+instead takes the newest release of the pinned series from kernel.org, so
+`KERNEL_VERSION` may be ahead of the version in Kata's `versions.yaml`;
+`build.sh` accepts that as long as the series is the same. The Kernel bump
+workflow (`kernel-bump.yml`, weekly and by hand) runs
+`scripts/bump-kernel.sh`, which reads kernel.org's `releases.json`, and for
+a newer release of the series:
+
+- takes the tarball's SHA-256 from the series' `sha256sums.asc`, after
+  checking that file's PGP signature against kernel.org's checksum
+  autosigner key (`keys/kernel-org-autosigner.asc`, fingerprint
+  `B886 8C80 BA62 A1FF FAF5 FDA9 632D 3A06 589D A6B1`, also published in
+  kernel.org's `pgpkeys` repository);
+- sets `KERNEL_VERSION` and `LINUX_SHA256` and resets `KIKI_REVISION` to 1;
+- updates the single pull request on `bot/kernel-bump`, and starts a build
+  of the branch.
+
+It never merges: check that the build passed (a patch that no longer
+applies, or a dropped fragment option, fails it), drop patches the new
+release has, merge, and push the tag `v<release>` to publish. The workflow
+needs a GitHub App installed on the repository (`KERNEL_BOT_APP_ID` as a
+variable, `KERNEL_BOT_PRIVATE_KEY` as a secret) with contents, pull
+requests and actions write, since a pull request opened with the default
+token starts no workflows.
 
 Any other change to what goes into the kernel (a patch, a fragment, the
 builder image) bumps `KIKI_REVISION` alone, and is released the same way.
